@@ -30,8 +30,8 @@ my $GIT_TIMEOUT = 1;
 # Seconds a command from the config gets to finish, unless it sets its own timeout
 my $COMMAND_TIMEOUT = 1;
 
-# Bytes of a command's output to keep; the first line is taken from these
-my $COMMAND_OUTPUT_LIMIT = 4096;
+# Bytes of output to keep from git or a command; anything after this is read and thrown away
+my $OUTPUT_LIMIT = 4096;
 
 # Each section returns its text without the label, or nothing to leave it out
 my %SECTIONS = (
@@ -326,10 +326,7 @@ sub short_dir {
 sub git_prompt {
     my ( $dir, $git ) = @_;
 
-    return unless defined $dir;
-
-    my $dir_bytes = Encode::encode( 'UTF-8', $dir );
-    return unless -d $dir_bytes;
+    return unless defined $dir && -d Encode::encode( 'UTF-8', $dir );
 
     my $script = $git->{script} // List::Util::first { -r $_ } @GIT_PROMPT_SCRIPTS;
     return unless defined $script && -r $script;
@@ -340,20 +337,8 @@ sub git_prompt {
     # Don't take git's index lock just to draw the prompt
     local $ENV{GIT_OPTIONAL_LOCKS} = $ENV{GIT_OPTIONAL_LOCKS} // 0;
 
-    my $pid = open( my $fh, '-|' ) // return;
-    if ( $pid == 0 ) {
-        chdir $dir_bytes or POSIX::_exit(1);
-        open STDERR, '>', '/dev/null';
-
-        # The alarm carries over into bash, which it ends if git is slow
-        alarm $GIT_TIMEOUT;
-        { exec 'bash', '-c', '. "$1" && __git_ps1 "$2"', 'claude-prompt', $script, Encode::encode( 'UTF-8', $git->{format} ) };
-        POSIX::_exit(1);
-    }
-
-    my $out = do { local $/; <$fh> }
-        // '';
-    close $fh;
+    my ($out) = run_program( [ 'bash', '-c', '. "$1" && __git_ps1 "$2"', 'claude-prompt', $script, Encode::encode( 'UTF-8', $git->{format} ) ], '', $dir, $GIT_TIMEOUT );
+    return unless defined $out;
 
     $out = Encode::decode( 'UTF-8', $out );
     $out =~ s/^\s+|\s+$//g;
@@ -366,13 +351,31 @@ sub git_prompt {
 sub run_command {
     my ( $command, $context ) = @_;
 
+    my ( $output, $status ) = run_program( [ '/bin/sh', '-c', Encode::encode( 'UTF-8', $command->{run} ) ], $context->{raw_input}, $context->{dir}, $command->{timeout} // $COMMAND_TIMEOUT );
+    return unless defined $output && $status == 0;
+
+    my ($line) = split /\n/, $output;
+    return unless defined $line;
+
+    $line = Encode::decode( 'UTF-8', $line );
+    $line =~ s/^\s+|\s+$//g;
+
+    return length $line ? $line : undef;
+}
+
+# Runs a program with $input on STDIN, from $dir when that's a folder, returning the start of
+# what it prints (up to $OUTPUT_LIMIT bytes) and its exit status. Returns nothing if it's still
+# running after $timeout seconds, and stops it along with everything it started.
+sub run_program {
+    my ( $command, $input, $dir, $timeout ) = @_;
+
     pipe( my $stdin_read,  my $stdin_write )  or return;
     pipe( my $stdout_read, my $stdout_write ) or return;
 
     my $pid = fork // return;
     if ( $pid == 0 ) {
 
-        # Its own process group, so a timeout can stop everything the command started
+        # Its own process group, so a timeout can stop everything the program started
         setpgrp( 0, 0 );
 
         open STDIN,  '<&', $stdin_read   or POSIX::_exit(1);
@@ -381,9 +384,9 @@ sub run_command {
         close $_ for $stdin_read, $stdin_write, $stdout_read, $stdout_write;
 
         # Run from Claude Code's folder when there is one, otherwise from wherever this was started
-        chdir Encode::encode( 'UTF-8', $context->{dir} ) if defined $context->{dir};
+        chdir Encode::encode( 'UTF-8', $dir ) if defined $dir;
 
-        { exec '/bin/sh', '-c', Encode::encode( 'UTF-8', $command->{run} ) };
+        { exec { $command->[0] } @$command };
         POSIX::_exit(127);
     }
 
@@ -392,26 +395,24 @@ sub run_command {
     close $stdin_read;
     close $stdout_write;
 
-    # A command that exits without reading its input shouldn't take this script down with it
+    # A program that exits without reading its input shouldn't take this script down with it
     local $SIG{PIPE} = 'IGNORE';
 
-    my ( $line, $status );
+    my ( $output, $status ) = ('');
     my $finished = eval {
         local $SIG{ALRM} = sub { die "timeout\n" };
-        Time::HiRes::alarm( $command->{timeout} // $COMMAND_TIMEOUT );
+        Time::HiRes::alarm($timeout);
 
-        print {$stdin_write} $context->{raw_input};
+        print {$stdin_write} $input;
         close $stdin_write;
 
-        # Read in pieces, keeping only the start, so a command that prints without stopping
+        # Read in pieces, keeping only the start, so a program that prints without stopping
         # can't fill memory and the time limit gets checked between pieces. Reading to the
-        # end, rather than stopping at the first line, lets the command finish normally.
-        my $output = '';
+        # end, rather than stopping early, lets the program finish normally.
         while ( sysread $stdout_read, my $piece, 65_536 ) {
-            $output .= $piece if length $output < $COMMAND_OUTPUT_LIMIT;
+            $output .= $piece if length $output < $OUTPUT_LIMIT;
         }
         close $stdout_read;
-        ($line) = split /\n/, substr( $output, 0, $COMMAND_OUTPUT_LIMIT );
 
         waitpid $pid, 0;
         $status = $?;
@@ -427,12 +428,7 @@ sub run_command {
         return;
     }
 
-    return unless $status == 0 && defined $line;
-
-    $line = Encode::decode( 'UTF-8', $line );
-    $line =~ s/^\s+|\s+$//g;
-
-    return length $line ? $line : undef;
+    return ( substr( $output, 0, $OUTPUT_LIMIT ), $status );
 }
 
 # Uses Claude Code's hit ratio for the whole session when it sends one,
