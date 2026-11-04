@@ -170,3 +170,7 @@ Code style follows `.perltidyrc`, and `perlcritic` should pass at its default le
 
     $ perltidy --profile=.perltidyrc -nst -b -bext='/' bin/claude-prompt t/claude-prompt.t
     $ perlcritic bin/claude-prompt t/claude-prompt.t
+
+## LICENSE
+
+MIT.  See `LICENSE`.
