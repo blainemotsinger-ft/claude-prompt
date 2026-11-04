@@ -1,0 +1,70 @@
+{
+    "session_id": "00000000-0000-0000-0000-000000000000",
+    "transcript_path": "__HOME__/.claude/projects/-home-user-git-project/00000000-0000-0000-0000-000000000000.jsonl",
+    "cwd": "__HOME__/git/project",
+    "scratchpad_dir": "/tmp/claude-1000/example/scratchpad",
+    "prompt_id": "00000000-0000-0000-0000-000000000000",
+    "effort": {
+        "level": "high"
+    },
+    "session_name": "Example session",
+    "model": {
+        "id": "claude-opus-5-5",
+        "display_name": "Opus 5.5"
+    },
+    "workspace": {
+        "current_dir": "__HOME__/git/project",
+        "project_dir": "__HOME__/git/project",
+        "added_dirs": [],
+        "repo": {
+            "host": "github.com",
+            "owner": "example",
+            "name": "project"
+        }
+    },
+    "version": "2.1.318",
+    "output_style": {
+        "name": "default"
+    },
+    "cost": {
+        "total_cost_usd": 2.7330505,
+        "total_duration_ms": 2279432,
+        "total_api_duration_ms": 536844,
+        "total_lines_added": 53,
+        "total_lines_removed": 5
+    },
+    "context_window": {
+        "total_input_tokens": 131521,
+        "total_output_tokens": 4,
+        "context_window_size": 1000000,
+        "current_usage": {
+            "input_tokens": 2,
+            "output_tokens": 4,
+            "cache_creation_input_tokens": 1390,
+            "cache_read_input_tokens": 130129
+        },
+        "used_percentage": 13,
+        "remaining_percentage": 87
+    },
+    "exceeds_200k_tokens": false,
+    "prompt_cache": {
+        "warm": true,
+        "caching_observed": true,
+        "ttl": "1h",
+        "expires_at": 1793825223,
+        "requests": 34,
+        "misses": 0,
+        "expected_rebuilds": 0,
+        "hit_ratio": 0.9859208660215787,
+        "cache_write_tokens": 50114,
+        "miss_recache_tokens": 0,
+        "last_miss_at": null,
+        "last_miss_cause": null,
+        "miss_causes": {},
+        "recache_tokens_if_cold": 130131
+    },
+    "fast_mode": false,
+    "thinking": {
+        "enabled": true
+    }
+}

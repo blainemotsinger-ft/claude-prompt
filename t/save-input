@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Saves each statusline input Claude Code sends into a folder, then draws the statusline as usual.
+# Used to collect real input for the tests; see TESTS in README.md.
+#
+#   "statusLine": { "type": "command", "command": "CLAUDE_PROMPT_SAVE_DIR=/tmp/inputs ~/git/claude-prompt/t/save-input" }
+
+dir=${CLAUDE_PROMPT_SAVE_DIR:?set CLAUDE_PROMPT_SAVE_DIR to the folder to save into}
+mkdir -p "$dir" || exit 1
+
+tee "$dir/$(date +%Y%m%d-%H%M%S)-$$.json" | exec "$(dirname "$0")/../bin/claude-prompt"

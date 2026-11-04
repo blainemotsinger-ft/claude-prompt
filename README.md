@@ -204,7 +204,16 @@ Claude Code drops statusline lines that are empty or only spaces.  So each paddi
 
     $ prove t/
 
-The tests run the script with JSON shaped like what Claude Code sends, using temporary home folders and git repos.  Each run is limited to about 1 GB of memory and 10 seconds, so a bug that makes the script run without stopping fails its test instead of slowing down the machine.  They don't read your global git config, your `GIT_PS1_*` settings, or your claude-prompt config.  The git tests are skipped if git's prompt helper isn't installed.
+The tests run the script with JSON shaped like what Claude Code sends, using temporary home folders and git repos.  Each run is limited to about 1 GB of memory and 10 seconds, so a bug that makes the script run without stopping fails its test instead of slowing down the machine.  They don't read your global git config, your `GIT_PS1_*` settings, or your claude-prompt config.  The tests that check how git's output is shown are skipped if git's prompt helper isn't installed; the rest use a stand-in for it.
+
+`t/data/` holds real input saved from Claude Code, named for the Claude Code version that sent it, so the tests also check what Claude Code actually sends and not only what we expect it to send.  To save more, for example after a Claude Code update, point the statusline at `t/save-input` for a session.  It saves each input to a folder and then draws the statusline as usual:
+
+    "statusLine": {
+      "type": "command",
+      "command": "CLAUDE_PROMPT_SAVE_DIR=/tmp/claude-prompt-inputs ~/git/claude-prompt/t/save-input"
+    }
+
+Replace personal details before adding a saved file to `t/data/`: your home folder with `__HOME__` (the tests swap in their own), and session IDs, session names, and repo owners with made-up values.
 
 Code style follows `.perltidyrc`, and `perlcritic` should pass at its default level:
 
