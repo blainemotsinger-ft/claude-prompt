@@ -10,7 +10,7 @@ Claude Code statusline in the style of a shell prompt
 
 followed by one blank padding line.
 
-Claude Code runs it each time it redraws the statusline, and sends the session's details as JSON on STDIN.  Everything on the line comes from that JSON, except the git part, which comes from git's own `__git_ps1`, so it matches what a bash prompt shows for the same folder.
+Claude Code runs it each time it redraws the statusline, and sends the session's details as JSON on STDIN.  Everything on the line comes from that JSON, except the git part, which comes from git's own `__git_ps1`, so it matches what a bash prompt shows for the same folder.  You can also add sections of your own that show what a command prints (see `commands`).
 
 The output is plain text, with no colors.
 
@@ -65,12 +65,12 @@ The file is read from the first of:
 2. `$XDG_CONFIG_HOME/claude-prompt/config.json`
 3. `~/.config/claude-prompt/config.json`
 
-To start from the default, copy `config.example.json`:
+`config.example.json` shows every setting, with comments saying what each one does.  To start from it, copy it:
 
     $ mkdir -p ~/.config/claude-prompt
     $ cp config.example.json ~/.config/claude-prompt/config.json
 
-The file only needs the settings you want to change.  Anything left out keeps its default, and `labels`, `git`, and `git.env` are merged with their defaults one key at a time.  `#` comments and trailing commas are allowed.
+Its layout isn't the default: it adds the untracked-files marker to the git part, and two example commands, for lines changed and the time.  The file only needs the settings you want to change, so delete anything you'd rather keep at its default.  Anything left out keeps its default, and `labels`, `git`, `git.env`, and `commands` are merged with their defaults one key at a time.  `#` comments and trailing commas are allowed.
 
 If the file has a problem, such as invalid JSON, a misspelled section or setting name, or a value of the wrong type, the statusline shows what's wrong in place of the prompt:
 
@@ -108,7 +108,7 @@ Text between the top-level items in `sections`.  Default: one space.
 
 ### labels
 
-Text shown in front of each section's value, by section name.  Defaults: `model:`, `context:`, `cache:`, `cost:`, `time:`, and nothing for `dir` and `git`.  Use `""` for no label.
+Text shown in front of each section's value, by section name.  Defaults: `model:`, `context:`, `cache:`, `cost:`, `time:`, and nothing for `dir`, `git`, and commands.  Use `""` for no label.
 
 ### git
 
@@ -118,9 +118,45 @@ Text shown in front of each section's value, by section name.  Defaults: `model:
 
 ### padding
 
-Number of blank lines after the statusline.  Default: 1.
+Number of blank lines after the statusline.  Default: 1.  Use 0 for none.  See PADDING LINES for how the blank lines are drawn.
+
+### commands
+
+Sections of your own, each showing what a command prints, like `#(command)` in a tmux status line.  Each one is named, and the name goes in `sections` like any other section:
+
+    {
+        "commands": {
+            "k8s":     { "run": "kubectl config current-context" },
+            "weather": { "run": "~/bin/weather.sh", "timeout": 2 }
+        },
+        "sections": ["dir", "git", "k8s", "weather"],
+        "labels": { "k8s": "k8s:" }
+    }
+
+- `run`: the command, run with `/bin/sh -c`, so pipes, `~`, and `$VARIABLES` work as they would in a shell script
+- `timeout`: seconds it gets to finish (default: 1).  Fractions such as `0.5` are allowed.
+
+How a command is run:
+
+- It runs in the folder Claude Code is working in, the one `dir` shows.
+- It gets the same JSON Claude Code sends to claude-prompt on STDIN, so it can use the session ID, the transcript path, lines added and removed, and anything else in there.  It doesn't have to read it.
+- The first line it prints becomes the section's value, with spaces at either end trimmed.  Anything after the first line is ignored, and so is anything it prints to STDERR.
+- It's left out, the same as a section with nothing to show, if it prints nothing, exits with an error (anything other than 0), or is still running when its `timeout` is up.  A script can use this to hide its section, by printing nothing or with `exit 1`.
+- When the `timeout` is up, the command is stopped, along with anything it started, such as a `sleep` or a background job.
+
+Commands run again on every redraw, one after another, so they add their time to every redraw.  Keep them quick.  For anything slow, such as a call to a web service, have the command print a saved answer and update that answer some other way, for example from cron.
+
+A command can't use the name of a built-in section, such as `git`.
 
 ### examples
+
+No blank line under the statusline:
+
+    { "padding": 0 }
+
+Two blank lines under it, for more room between the statusline and the box you type in:
+
+    { "padding": 2 }
 
 Drop the space before the `*`, so it reads `(main*)`:
 
@@ -158,13 +194,17 @@ Claude Code drops statusline lines that are empty or only spaces.  So each paddi
 
 **The git part is missing.**  Check that the folder is a git repo, and that git's prompt helper is installed.  `ls "$(git --exec-path)/git-sh-prompt"` shows where git keeps it on many systems.  If it's somewhere other than the locations in REQUIREMENTS, set `git.script`.
 
+**A command's section is missing.**  It printed nothing, exited with an error, or ran past its `timeout` (see `commands`).  To see what it does, run it by hand from the same folder, with the same kind of JSON on STDIN:
+
+    $ echo '{"session_id": "test"}' | sh -c 'YOUR COMMAND'; echo "exit: $?"
+
 **The statusline shows `claude-prompt: ...config.json: ...`.**  The config file has a problem, and the message says what and where.  Fix the file, and the prompt comes back on the next redraw.
 
 ## TESTS
 
     $ prove t/
 
-The tests run the script with JSON shaped like what Claude Code sends, using temporary home folders and git repos.  They don't read your global git config, your `GIT_PS1_*` settings, or your claude-prompt config.  The git tests are skipped if git's prompt helper isn't installed.
+The tests run the script with JSON shaped like what Claude Code sends, using temporary home folders and git repos.  Each run is limited to about 1 GB of memory and 10 seconds, so a bug that makes the script run without stopping fails its test instead of slowing down the machine.  They don't read your global git config, your `GIT_PS1_*` settings, or your claude-prompt config.  The git tests are skipped if git's prompt helper isn't installed.
 
 Code style follows `.perltidyrc`, and `perlcritic` should pass at its default level:
 

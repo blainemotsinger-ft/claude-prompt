@@ -12,10 +12,11 @@
 use strict;
 use warnings;
 
-use Encode     ();
-use JSON::PP   ();
-use List::Util ();
-use POSIX      ();
+use Encode      ();
+use JSON::PP    ();
+use List::Util  ();
+use POSIX       ();
+use Time::HiRes ();
 
 my @GIT_PROMPT_SCRIPTS = ( '/usr/lib/git-core/git-sh-prompt', '/usr/share/git-core/contrib/completion/git-prompt.sh', '/etc/bash_completion.d/git-prompt', '/opt/homebrew/etc/bash_completion.d/git-prompt.sh', '/usr/local/etc/bash_completion.d/git-prompt.sh', );
 
@@ -25,6 +26,12 @@ my $BLANK = "\x{2800}";
 
 # Seconds to wait for git before leaving the branch out
 my $GIT_TIMEOUT = 1;
+
+# Seconds a command from the config gets to finish, unless it sets its own timeout
+my $COMMAND_TIMEOUT = 1;
+
+# Bytes of a command's output to keep; the first line is taken from these
+my $COMMAND_OUTPUT_LIMIT = 4096;
 
 # Each section returns its text without the label, or nothing to leave it out
 my %SECTIONS = (
@@ -59,14 +66,15 @@ sub default_config {
             format => '(%s)',
             env    => {},
         },
-        padding => 1,
+        padding  => 1,
+        commands => {},
     };
 }
 
 binmode STDOUT, ':encoding(UTF-8)';
 
-my $input = read_input();
-my $dir   = string( field( $input, qw(workspace current_dir) ) ) // string( field( $input, 'cwd' ) );
+my ( $input, $raw_input ) = read_input();
+my $dir = string( field( $input, qw(workspace current_dir) ) ) // string( field( $input, 'cwd' ) );
 
 my $config = eval { load_config() };
 if ( !$config ) {
@@ -75,7 +83,7 @@ if ( !$config ) {
     exit;
 }
 
-my $line = render_items( $config->{sections}, $config->{separator}, { input => $input, config => $config, dir => $dir } );
+my $line = render_items( $config->{sections}, $config->{separator}, { input => $input, raw_input => $raw_input, config => $config, dir => $dir } );
 
 print $line // '', "\n";
 print "$BLANK\n" for 1 .. $config->{padding};
@@ -85,7 +93,8 @@ sub read_input {
         // '';
     my $data = eval { JSON::PP->new->utf8->decode($json) };
 
-    return ref $data eq 'HASH' ? $data : {};
+    # The parsed input, and the bytes as sent, which are passed on to commands
+    return ( ref $data eq 'HASH' ? $data : {} ), $json;
 }
 
 sub config_path {
@@ -138,14 +147,17 @@ sub load_config {
 sub check_config {
     my ($config) = @_;
 
-    my $error = check_sections( $config->{sections}, 'sections' );
+    my $error = check_commands( $config->{commands} );
+    return $error if $error;
+
+    $error = check_sections( $config->{sections}, 'sections', $config );
     return $error if $error;
 
     return '"separator" should be text' unless is_text( $config->{separator} );
 
     return '"labels" should be an object, like {"model": "model:"}' unless ref $config->{labels} eq 'HASH';
     for my $name ( sort keys %{ $config->{labels} } ) {
-        return "unknown section \"$name\" in \"labels\"" unless $SECTIONS{$name};
+        return "unknown section \"$name\" in \"labels\"" unless is_section( $config, $name );
         return "label for \"$name\" should be text"      unless is_text( $config->{labels}{$name} );
     }
 
@@ -166,8 +178,31 @@ sub check_config {
     return;
 }
 
+sub check_commands {
+    my ($commands) = @_;
+
+    return '"commands" should be an object, like {"k8s": {"run": "kubectl config current-context"}}' unless ref $commands eq 'HASH';
+
+    for my $name ( sort keys %$commands ) {
+        return 'a command in "commands" has an empty name' unless length $name;
+        return "command \"$name\" has the same name as a built-in section" if $SECTIONS{$name};
+
+        my $command = $commands->{$name};
+        return "command \"$name\" should be an object, like {\"run\": \"date +%H:%M\"}" unless ref $command eq 'HASH';
+        for my $key ( sort keys %$command ) {
+            return "unknown setting \"$key\" in command \"$name\"" unless $key =~ /^(?:run|timeout)$/;
+        }
+        return "command \"$name\" needs \"run\", the command to run, like \"date +%H:%M\"" unless is_text( $command->{run} ) && length $command->{run};
+
+        my $timeout = number( $command->{timeout} );
+        return "\"timeout\" in command \"$name\" should be a number of seconds above 0, like 1" if exists $command->{timeout} && !( defined $timeout && $timeout > 0 );
+    }
+
+    return;
+}
+
 sub check_sections {
-    my ( $sections, $where ) = @_;
+    my ( $sections, $where, $config ) = @_;
 
     return "\"$where\" should be a list, like [\"dir\", \"git\"]" unless ref $sections eq 'ARRAY';
 
@@ -179,11 +214,11 @@ sub check_sections {
             for my $key (qw(separator before after)) {
                 return "\"$key\" in a group in \"$where\" should be text" if exists $item->{$key} && !is_text( $item->{$key} );
             }
-            my $error = check_sections( $item->{sections}, "$where.sections" );
+            my $error = check_sections( $item->{sections}, "$where.sections", $config );
             return $error if $error;
         }
         elsif ( is_text($item) ) {
-            return "unknown section \"$item\" in \"$where\" (known: " . join( ', ', sort keys %SECTIONS ) . ')' unless $SECTIONS{$item};
+            return "unknown section \"$item\" in \"$where\" (known: " . join( ', ', sort( keys %SECTIONS, keys %{ $config->{commands} } ) ) . ')' unless is_section( $config, $item );
         }
         else {
             return "each item in \"$where\" should be a section name or a group";
@@ -191,6 +226,13 @@ sub check_sections {
     }
 
     return;
+}
+
+# True for a built-in section or a command from the config
+sub is_section {
+    my ( $config, $name ) = @_;
+
+    return $SECTIONS{$name} || $config->{commands}{$name};
 }
 
 sub is_text {
@@ -217,7 +259,7 @@ sub render_item {
         return ( $item->{before} // '' ) . $inner . ( $item->{after} // '' );
     }
 
-    my $value = $SECTIONS{$item}->($context);
+    my $value = $SECTIONS{$item} ? $SECTIONS{$item}->($context) : run_command( $context->{config}{commands}{$item}, $context );
     return unless defined $value && length $value;
 
     return ( $context->{config}{labels}{$item} // '' ) . $value;
@@ -317,6 +359,80 @@ sub git_prompt {
     $out =~ s/^\s+|\s+$//g;
 
     return length $out ? $out : undef;
+}
+
+# Runs a command from the config with the session's JSON on STDIN, returning the first
+# line it prints, or nothing if it prints nothing, fails, or runs past its time limit
+sub run_command {
+    my ( $command, $context ) = @_;
+
+    pipe( my $stdin_read,  my $stdin_write )  or return;
+    pipe( my $stdout_read, my $stdout_write ) or return;
+
+    my $pid = fork // return;
+    if ( $pid == 0 ) {
+
+        # Its own process group, so a timeout can stop everything the command started
+        setpgrp( 0, 0 );
+
+        open STDIN,  '<&', $stdin_read   or POSIX::_exit(1);
+        open STDOUT, '>&', $stdout_write or POSIX::_exit(1);
+        open STDERR, '>',  '/dev/null';
+        close $_ for $stdin_read, $stdin_write, $stdout_read, $stdout_write;
+
+        # Run from Claude Code's folder when there is one, otherwise from wherever this was started
+        chdir Encode::encode( 'UTF-8', $context->{dir} ) if defined $context->{dir};
+
+        { exec '/bin/sh', '-c', Encode::encode( 'UTF-8', $command->{run} ) };
+        POSIX::_exit(127);
+    }
+
+    # Set in the parent as well, so the group exists before any timeout tries to stop it
+    setpgrp( $pid, $pid );
+    close $stdin_read;
+    close $stdout_write;
+
+    # A command that exits without reading its input shouldn't take this script down with it
+    local $SIG{PIPE} = 'IGNORE';
+
+    my ( $line, $status );
+    my $finished = eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        Time::HiRes::alarm( $command->{timeout} // $COMMAND_TIMEOUT );
+
+        print {$stdin_write} $context->{raw_input};
+        close $stdin_write;
+
+        # Read in pieces, keeping only the start, so a command that prints without stopping
+        # can't fill memory and the time limit gets checked between pieces. Reading to the
+        # end, rather than stopping at the first line, lets the command finish normally.
+        my $output = '';
+        while ( sysread $stdout_read, my $piece, 65_536 ) {
+            $output .= $piece if length $output < $COMMAND_OUTPUT_LIMIT;
+        }
+        close $stdout_read;
+        ($line) = split /\n/, substr( $output, 0, $COMMAND_OUTPUT_LIMIT );
+
+        waitpid $pid, 0;
+        $status = $?;
+
+        Time::HiRes::alarm(0);
+        1;
+    };
+    Time::HiRes::alarm(0);
+
+    if ( !$finished ) {
+        kill 'KILL', -$pid;
+        waitpid $pid, 0;
+        return;
+    }
+
+    return unless $status == 0 && defined $line;
+
+    $line = Encode::decode( 'UTF-8', $line );
+    $line =~ s/^\s+|\s+$//g;
+
+    return length $line ? $line : undef;
 }
 
 # Uses Claude Code's hit ratio for the whole session when it sends one,

@@ -1,25 +1,74 @@
+# An example of every claude-prompt setting.  Copy it to ~/.config/claude-prompt/config.json
+# and change what you like.  Settings you leave out keep their defaults, so you can also
+# delete anything you don't want to change.  See CONFIGURATION in README.md.
+#
+# With this file, the statusline looks like:
+#
+#   ~/git/project (main *%) [model:Opus 5.5 | context:10% | cache:98% | cost:$1.97 | time:1h 2m | lines:+120 -34] 14:05
 {
+    # What to show, in order.  Each item is a section name, or a group of sections.
+    # Built-in sections: dir, git, model, context, cache, cost, time.
+    # Names from "commands" below can be used here too.
     "sections": [
         "dir",
         "git",
         {
+            # A group: "before" and "after" go around it, "separator" goes between
+            # its sections, and the whole group is left out if none of them show
             "before": "[",
-            "sections": ["model", "context", "cache", "cost", "time"],
+            "sections": ["model", "context", "cache", "cost", "time", "lines"],
             "separator": " | ",
             "after": "]"
-        }
+        },
+        "clock"
     ],
+
+    # Text between the items at the top level of "sections"
     "separator": " ",
+
+    # Text in front of each section's value.  "" for none.
     "labels": {
+        "dir": "",
+        "git": "",
         "model": "model:",
         "context": "context:",
         "cache": "cache:",
         "cost": "cost:",
-        "time": "time:"
+        "time": "time:",
+        "lines": "lines:",
+        "clock": ""
     },
+
     "git": {
+        # Passed to __git_ps1, where %s is the branch and its status
         "format": "(%s)",
-        "env": {}
+
+        # GIT_PS1_* settings for __git_ps1.  The full list is in the comments at the
+        # top of git's prompt helper.  These two add * for changes and % for new files.
+        "env": {
+            "GIT_PS1_SHOWDIRTYSTATE": "1",
+            "GIT_PS1_SHOWUNTRACKEDFILES": "1"
+        }
+
+        # Where git's prompt helper is, if it isn't in one of the usual places
+        # (see REQUIREMENTS in README.md).  Left out here so the usual places are checked.
+        # "script": "/usr/lib/git-core/git-sh-prompt"
     },
-    "padding": 1
+
+    # Number of blank lines under the statusline.  0 for none.
+    "padding": 1,
+
+    # Sections of your own.  Each runs a command and shows the first line it prints.
+    # The command gets Claude Code's JSON on STDIN, and runs in Claude Code's folder.
+    "commands": {
+        # The time of day
+        "clock": { "run": "date +%H:%M" },
+
+        # Lines added and removed this session, read from the JSON on STDIN.
+        # "timeout" is how many seconds it gets before it's left out (default: 1).
+        "lines": {
+            "run": "perl -MJSON::PP -0777 -ne '$c = decode_json($_)->{cost}; print \"+$c->{total_lines_added} -$c->{total_lines_removed}\" if $c'",
+            "timeout": 2
+        }
+    }
 }

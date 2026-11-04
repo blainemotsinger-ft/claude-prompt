@@ -8,6 +8,7 @@ use FindBin    ();
 use IPC::Open2 ();
 use JSON::PP   ();
 use Test::More;
+use Time::HiRes ();
 
 my $SCRIPT = "$FindBin::Bin/../bin/claude-prompt";
 my $BLANK  = "\x{2800}";
@@ -64,12 +65,18 @@ sub run_prompt {
 
     my $json = ref $input ? JSON::PP->new->utf8->encode($input) : $input;
 
-    my $pid = IPC::Open2::open2( my $out, my $in, $^X, $SCRIPT );
+    # Under a memory limit and a timer, so a bug that runs away stops the test, not the machine
+    my $pid = IPC::Open2::open2( my $out, my $in, '/bin/sh', '-c', 'ulimit -v 1000000 && exec "$@"', 'sh', $^X, $SCRIPT );
+
+    local $SIG{ALRM} = sub { kill 'KILL', $pid; die "claude-prompt took more than 10 seconds\n" };
+    alarm 10;
+
     print {$in} $json;
     close $in;
 
     my $output = do { local $/; <$out> };
     waitpid $pid, 0;
+    alarm 0;
 
     return split /\n/, Encode::decode( 'UTF-8', $output );
 }
@@ -435,17 +442,18 @@ subtest 'should print an empty line and padding when the input is not JSON' => s
     is_deeply( \@lines, [ '', $BLANK ] );
 };
 
-subtest 'should match the default layout when using config.example.json' => sub {
+subtest 'should show the layout config.example.json describes' => sub {
 
     # Arrange
-    my $home    = File::Temp->newdir;
-    my @default = run_prompt( session_input("$home"), HOME => "$home" );
+    my $home = File::Temp->newdir;
 
     # Act
     my @lines = run_prompt( session_input("$home"), HOME => "$home", CLAUDE_PROMPT_CONFIG => "$FindBin::Bin/../config.example.json" );
 
     # Assert
-    is_deeply( \@lines, \@default );
+    # Not in a git repo, so there's no git part; the last part is the clock command
+    like( $lines[0], qr/^~ \[model:Opus 5\.5 \| context:10% \| cache:98% \| cost:\$1\.97 \| time:1h 2m \| lines:\+120 -34\] \d\d:\d\d$/ );
+    is_deeply( [ @lines[ 1 .. $#lines ] ], [$BLANK] );
 };
 
 subtest 'should show sections in the order the config lists them' => sub {
@@ -662,6 +670,216 @@ subtest 'should still add one padding line when showing a config error' => sub {
 
     # Assert
     is_deeply( [ @lines[ 1 .. $#lines ] ], [$BLANK] );
+};
+
+subtest 'should show a command from the config as a section, with its label' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { greeting => { run => 'echo hello' } }, sections => [qw(greeting model)], labels => { greeting => 'say:' } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'say:hello model:Opus 5.5' );
+};
+
+subtest 'should send the session JSON to a command on STDIN' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { session => { run => qq("$^X" -MJSON::PP -0777 -ne 'print decode_json(\$_)->{session_id}') } }, sections => ['session'] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, '3f2c9a1e-7b4d-4e8a-9c1f-2d6b5a8e0f13' );
+};
+
+subtest 'should run a command in the folder Claude Code is working in' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    mkdir "$home/project";
+    write_config( $home, { commands => { folder => { run => 'pwd' } }, sections => ['folder'] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home/project"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr{/project$} );
+};
+
+subtest 'should show only the first line a command prints' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { lines => { run => 'echo one; echo two' } }, sections => [qw(lines model)] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'one model:Opus 5.5' );
+};
+
+subtest 'should keep non-ASCII characters in a command\'s output' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { weather => { run => 'echo ☀ 21°' } }, sections => ['weather'] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, '☀ 21°' );
+};
+
+subtest 'should leave out a command that exits with an error' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { broken => { run => 'echo partial; exit 3' } }, sections => [qw(broken model)] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'model:Opus 5.5' );
+};
+
+subtest 'should leave out a command that prints nothing' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { quiet => { run => 'true' } }, sections => [qw(quiet model)] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'model:Opus 5.5' );
+};
+
+subtest 'should leave out a command that runs past its timeout, without waiting for it' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { slow => { run => 'sleep 5; echo late', timeout => 0.5 } }, sections => [qw(slow model)] } );
+
+    # Act
+    my $start   = Time::HiRes::time();
+    my ($line)  = run_prompt( session_input("$home"), HOME => "$home" );
+    my $elapsed = Time::HiRes::time() - $start;
+
+    # Assert
+    is( $line, 'model:Opus 5.5' );
+    cmp_ok( $elapsed, '<', 3, 'finished well before the command would have' );
+};
+
+subtest 'should stop everything a command started when it runs past its timeout' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { slow => { run => "sleep 30 & echo \$! > '$home/pid'; wait", timeout => 0.5 } }, sections => ['slow'] } );
+
+    # Act
+    run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    open my $fh, '<', "$home/pid" or die $!;
+    chomp( my $pid = <$fh> );
+    close $fh;
+
+    # The stopped process can take a moment to be cleaned up after it's killed
+    my $running = 1;
+    for ( 1 .. 20 ) {
+        $running = kill 0, $pid;
+        last unless $running;
+        Time::HiRes::sleep(0.05);
+    }
+    ok( !$running, 'the sleep the command started is no longer running' );
+};
+
+subtest 'should leave out a command that prints without stopping, without running out of memory' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { endless => { run => 'yes', timeout => 0.5 } }, sections => [qw(endless model)] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'model:Opus 5.5' );
+};
+
+subtest 'should list commands from the config among the known sections in an error' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { weather => { run => 'true' } }, sections => ['wether'] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: unknown section "wether" in "sections" \(known: .*\bweather\b/ );
+};
+
+subtest 'should show an error when a command has the same name as a built-in section' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { git => { run => 'true' } } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: command "git" has the same name as a built-in section$/ );
+};
+
+subtest 'should show an error when a command has no run setting' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { weather => {} } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: command "weather" needs "run"/ );
+};
+
+subtest 'should show an error when a command\'s timeout is not above 0' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { weather => { run => 'true', timeout => 0 } } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: "timeout" in command "weather" should be a number of seconds above 0/ );
+};
+
+subtest 'should show an error naming an unknown setting in a command' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { commands => { weather => { run => 'true', tmeout => 1 } } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: unknown setting "tmeout" in command "weather"$/ );
 };
 
 done_testing;
