@@ -110,7 +110,11 @@ sub home_with_repo {
 
     mkdir "$home/git";
     mkdir $repo;
-    git( $repo, 'init', '-q', '-b', 'main' );
+    git( $repo, 'init', '-q' );
+
+    # Not 'init -b main', which needs git 2.28 or newer
+    git( $repo, 'symbolic-ref', 'HEAD', 'refs/heads/main' );
+
     open my $fh, '>', "$repo/README.md" or die $!;
     print {$fh} "# claude-pulse\n";
     close $fh;
