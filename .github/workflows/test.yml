@@ -22,8 +22,11 @@ jobs:
           # The perl that comes with the system, which is what most people will run it with
           - os: ubuntu-latest
             perl: system
-          - os: macos-latest
-            perl: system
+
+          # Turned off for now: GitHub often has no macOS runner free, and the job waits
+          # 15 minutes, never runs, and fails the check ("not acquired by Runner").
+          # - os: macos-latest
+          #   perl: system
 
           # The oldest perl the README says it works with
           - os: ubuntu-latest

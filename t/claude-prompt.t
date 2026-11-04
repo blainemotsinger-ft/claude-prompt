@@ -914,6 +914,148 @@ subtest 'should show an error naming an unknown setting in a command' => sub {
     like( $line, qr/: unknown setting "tmeout" in command "weather"$/ );
 };
 
+subtest 'should color a section and its label when the config gives it a color' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { colors => { model => { color => '#ff69b4' } } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, "~ [\e[38;2;255;105;180mmodel:Opus 5.5\e[39m | context:10% | cache:98% | cost:\$1.97 | time:1h 2m]" );
+};
+
+subtest 'should color context when it reaches the percent in "at"' => sub {
+
+    # Arrange
+    my $home  = File::Temp->newdir;
+    my $input = session_input("$home");
+    $input->{context_window}{used_percentage} = 45;
+    write_config( $home, { colors => { context => { color => '#FF8700', at => 45 } } } );
+
+    # Act
+    my ($line) = run_prompt( $input, HOME => "$home" );
+
+    # Assert
+    like( $line, qr/\| \e\[38;2;255;135;0mcontext:45%\e\[39m \|/ );
+};
+
+subtest 'should not color context below the percent in "at"' => sub {
+
+    # Arrange
+    my $home  = File::Temp->newdir;
+    my $input = session_input("$home");
+    $input->{context_window}{used_percentage} = 44;
+    write_config( $home, { colors => { context => { color => '#ff69b4', at => 45 } } } );
+
+    # Act
+    my ($line) = run_prompt( $input, HOME => "$home" );
+
+    # Assert
+    like( $line, qr/\| context:44% \|/ );
+};
+
+subtest 'should compare "at" to the rounded percent that is shown' => sub {
+
+    # Arrange
+    my $home  = File::Temp->newdir;
+    my $input = session_input("$home");
+    $input->{context_window}{used_percentage} = 44.5;
+    write_config( $home, { colors => { context => { color => '#ff69b4', at => 45 } } } );
+
+    # Act
+    my ($line) = run_prompt( $input, HOME => "$home" );
+
+    # Assert
+    like( $line, qr/\| \e\[38;2;255;105;180mcontext:45%\e\[39m \|/ );
+};
+
+subtest 'should color cost when it reaches the dollars in "at"' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { colors => { cost => { color => '#ff0000', at => 1.5 } } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/\| \e\[38;2;255;0;0mcost:\$1\.97\e\[39m \|/ );
+};
+
+subtest 'should color a command from the config' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config(
+        $home,
+        {   commands => { hello => { run => 'echo hi' } },
+            sections => ['hello'],
+            colors   => { hello => { color => '#00ff00' } },
+        }
+    );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, "\e[38;2;0;255;0mhi\e[39m" );
+};
+
+subtest 'should leave out a colored section that has nothing to show' => sub {
+
+    # Arrange
+    my $home  = File::Temp->newdir;
+    my $input = session_input("$home");
+    $input->{context_window}{used_percentage} = undef;
+    write_config( $home, { colors => { context => { color => '#ff69b4', at => 45 } } } );
+
+    # Act
+    my ($line) = run_prompt( $input, HOME => "$home" );
+
+    # Assert
+    is( $line, '~ [model:Opus 5.5 | cache:98% | cost:$1.97 | time:1h 2m]' );
+};
+
+# Red from 45, orange from 60, pink from 75, purple from 90, listed out of order on purpose
+my @FIRE = ( { color => '#ff69b4', at => 75 }, { color => '#ff3030', at => 45 }, { color => '#af5fff', at => 90 }, { color => '#ff8700', at => 60 } );
+
+for my $case ( [ 44, undef ], [ 45, '255;48;48' ], [ 59.5, '255;135;0' ], [ 74, '255;135;0' ], [ 75, '255;105;180' ], [ 90, '175;95;255' ], [ 100, '175;95;255' ] ) {
+    my ( $percent, $rgb ) = @$case;
+
+    subtest "should pick the color with the highest \"at\" reached from a list, at $percent%" => sub {
+
+        # Arrange
+        my $home  = File::Temp->newdir;
+        my $input = session_input("$home");
+        $input->{context_window}{used_percentage} = $percent;
+        write_config( $home, { colors => { context => \@FIRE } } );
+
+        # Act
+        my ($line) = run_prompt( $input, HOME => "$home" );
+
+        # Assert
+        my $shown = int( $percent + 0.5 );
+        if   ($rgb) { like( $line, qr/\| \e\[38;2;${rgb}mcontext:$shown%\e\[39m \|/ ) }
+        else        { like( $line, qr/\| context:$shown% \|/ ) }
+    };
+}
+
+subtest 'should use the color without "at" from a list until a number is reached' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { colors => { context => [ { color => '#ff3030', at => 45 }, { color => '#00ff00' } ] } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/\| \e\[38;2;0;255;0mcontext:10%\e\[39m \|/ );
+};
+
 subtest 'should use the prompt helper named in git.script' => sub {
 
     # Arrange
@@ -1072,26 +1214,38 @@ subtest 'should send real input from Claude Code 2.1.318 to a command as it was 
 # Each config problem, and the message the statusline should show for it
 my @CONFIG_ERRORS = (
     [ 'the file holds a list instead of an object', '[]', 'should hold a JSON object, like {"padding": 1}' ],
-    [ '"sections" is not a list',                   { sections  => 'dir' },                                               '"sections" should be a list, like ["dir", "git"]' ],
-    [ 'an item in "sections" is a list',            { sections  => [ ['dir'] ] },                                         'each item in "sections" should be a section name or a group' ],
-    [ 'a group has no list of sections',            { sections  => [ {} ] },                                              '"sections.sections" should be a list, like ["dir", "git"]' ],
-    [ 'a group has an unknown setting',             { sections  => [ { sections => ['dir'], befor => '[' } ] },           'unknown setting "befor" in a group in "sections"' ],
-    [ 'a group\'s "before" is not text',            { sections  => [ { sections => ['dir'], before => [] } ] },           '"before" in a group in "sections" should be text' ],
-    [ '"separator" is not text',                    { separator => [] },                                                  '"separator" should be text' ],
-    [ '"labels" is not an object',                  { labels    => [] },                                                  '"labels" should be an object, like {"model": "model:"}' ],
-    [ '"labels" names an unknown section',          { labels    => { modle => 'm:' } },                                   'unknown section "modle" in "labels"' ],
-    [ 'a label is not text',                        { labels    => { model => [] } },                                     'label for "model" should be text' ],
-    [ '"git" is not an object',                     { git       => 'yes' },                                               '"git" should be an object, like {"format": "(%s)"}' ],
-    [ '"git" has an unknown setting',               { git       => { fromat => '(%s)' } },                                'unknown setting "fromat" in "git"' ],
-    [ '"git.format" is not text',                   { git       => { format => [] } },                                    '"git.format" should be text' ],
-    [ '"git.script" is not text',                   { git       => { script => [] } },                                    '"git.script" should be text' ],
-    [ '"git.env" is not an object',                 { git       => { env => [] } },                                       '"git.env" should be an object, like {"GIT_PS1_SHOWDIRTYSTATE": "1"}' ],
-    [ 'a "git.env" value is not text',              { git       => { env => { GIT_PS1_SHOWDIRTYSTATE => [] } } },         '"git.env" value for "GIT_PS1_SHOWDIRTYSTATE" should be text' ],
-    [ '"commands" is not an object',                { commands  => [] },                                                  '"commands" should be an object, like {"k8s": {"run": "kubectl config current-context"}}' ],
-    [ 'a command has an empty name',                { commands  => { '' => { run => 'true' } } },                         'a command in "commands" has an empty name' ],
-    [ 'a command is not an object',                 { commands  => { weather => 'curl wttr.in' } },                       'command "weather" should be an object, like {"run": "date +%H:%M"}' ],
-    [ 'a command\'s "run" is empty',                { commands  => { weather => { run => '' } } },                        'command "weather" needs "run", the command to run, like "date +%H:%M"' ],
-    [ 'a command\'s timeout is not a number',       { commands  => { weather => { run => 'true', timeout => 'soon' } } }, '"timeout" in command "weather" should be a number of seconds above 0, like 1' ],
+    [ '"sections" is not a list',                   { sections  => 'dir' },                                                                                     '"sections" should be a list, like ["dir", "git"]' ],
+    [ 'an item in "sections" is a list',            { sections  => [ ['dir'] ] },                                                                               'each item in "sections" should be a section name or a group' ],
+    [ 'a group has no list of sections',            { sections  => [ {} ] },                                                                                    '"sections.sections" should be a list, like ["dir", "git"]' ],
+    [ 'a group has an unknown setting',             { sections  => [ { sections => ['dir'], befor => '[' } ] },                                                 'unknown setting "befor" in a group in "sections"' ],
+    [ 'a group\'s "before" is not text',            { sections  => [ { sections => ['dir'], before => [] } ] },                                                 '"before" in a group in "sections" should be text' ],
+    [ '"separator" is not text',                    { separator => [] },                                                                                        '"separator" should be text' ],
+    [ '"labels" is not an object',                  { labels    => [] },                                                                                        '"labels" should be an object, like {"model": "model:"}' ],
+    [ '"labels" names an unknown section',          { labels    => { modle => 'm:' } },                                                                         'unknown section "modle" in "labels"' ],
+    [ 'a label is not text',                        { labels    => { model => [] } },                                                                           'label for "model" should be text' ],
+    [ '"git" is not an object',                     { git       => 'yes' },                                                                                     '"git" should be an object, like {"format": "(%s)"}' ],
+    [ '"git" has an unknown setting',               { git       => { fromat => '(%s)' } },                                                                      'unknown setting "fromat" in "git"' ],
+    [ '"git.format" is not text',                   { git       => { format => [] } },                                                                          '"git.format" should be text' ],
+    [ '"git.script" is not text',                   { git       => { script => [] } },                                                                          '"git.script" should be text' ],
+    [ '"git.env" is not an object',                 { git       => { env => [] } },                                                                             '"git.env" should be an object, like {"GIT_PS1_SHOWDIRTYSTATE": "1"}' ],
+    [ 'a "git.env" value is not text',              { git       => { env => { GIT_PS1_SHOWDIRTYSTATE => [] } } },                                               '"git.env" value for "GIT_PS1_SHOWDIRTYSTATE" should be text' ],
+    [ '"commands" is not an object',                { commands  => [] },                                                                                        '"commands" should be an object, like {"k8s": {"run": "kubectl config current-context"}}' ],
+    [ 'a command has an empty name',                { commands  => { '' => { run => 'true' } } },                                                               'a command in "commands" has an empty name' ],
+    [ 'a command is not an object',                 { commands  => { weather => 'curl wttr.in' } },                                                             'command "weather" should be an object, like {"run": "date +%H:%M"}' ],
+    [ 'a command\'s "run" is empty',                { commands  => { weather => { run => '' } } },                                                              'command "weather" needs "run", the command to run, like "date +%H:%M"' ],
+    [ 'a command\'s timeout is not a number',       { commands  => { weather => { run => 'true', timeout => 'soon' } } },                                       '"timeout" in command "weather" should be a number of seconds above 0, like 1' ],
+    [ '"colors" is not an object',                  { colors    => [] },                                                                                        '"colors" should be an object, like {"context": {"color": "#ff69b4", "at": 45}}' ],
+    [ '"colors" names an unknown section',          { colors    => { modle => { color => '#ff69b4' } } },                                                       'unknown section "modle" in "colors"' ],
+    [ 'a color is text instead of an object',       { colors    => { model => '#ff69b4' } },                                                                    'color for "model" should be an object, like {"color": "#ff69b4"}, or a list of them' ],
+    [ 'a color has an unknown setting',             { colors    => { model => { color => '#ff69b4', above => 1 } } },                                           'unknown setting "above" in color for "model"' ],
+    [ 'a color has no "color"',                     { colors    => { context => { at => 45 } } },                                                               'color for "context" needs "color", a color like "#ff69b4"' ],
+    [ 'a color is a name instead of #rrggbb',       { colors    => { model => { color => 'pink' } } },                                                          '"color" for "model" should be a color like "#ff69b4"' ],
+    [ 'a color\'s "at" is not a number',            { colors    => { context => { color => '#ff69b4', at => '45%' } } },                                        '"at" for "context" should be a number, like 45' ],
+    [ '"at" is set for a section with no number',   { colors    => { model => { color => '#ff69b4', at => 1 } } },                                              '"at" for "model" can\'t be used, because "model" doesn\'t show a number ("at" works for: cache, context, cost)' ],
+    [ 'the list of colors is empty',                { colors    => { context => [] } },                                                                         'the list of colors for "context" is empty' ],
+    [ 'a color in a list has a bad "color"',        { colors    => { context => [ { color => '#ff69b4', at => 45 }, { color => 'red', at => 60 } ] } },         '"color" for "context" (color 2) should be a color like "#ff69b4"' ],
+    [ 'two colors in a list have the same "at"',    { colors    => { context => [ { color => '#ff69b4', at => 45 }, { color => '#ff0000', at => '45.0' } ] } }, 'two colors for "context" have the same "at", 45.0' ],
+    [ 'two colors in a list leave out "at"',        { colors    => { context => [ { color => '#ff69b4' }, { color => '#ff0000' } ] } },                         'only one color for "context" can leave out "at"' ],
 );
 
 for my $case (@CONFIG_ERRORS) {

@@ -12,7 +12,7 @@ followed by one blank padding line.
 
 Claude Code runs it each time it redraws the statusline, and sends the session's details as JSON on STDIN.  Everything on the line comes from that JSON, except the git part, which comes from git's own `__git_ps1`, so it matches what a bash prompt shows for the same folder.  You can also add sections of your own that show what a command prints (see `commands`).
 
-The output is plain text, with no colors.
+The output is plain text, unless you give sections colors (see `colors`).
 
 ## REQUIREMENTS
 
@@ -70,7 +70,7 @@ The file is read from the first of:
     $ mkdir -p ~/.config/claude-prompt
     $ cp config.example.json ~/.config/claude-prompt/config.json
 
-Its layout isn't the default: it adds the untracked-files marker to the git part, and two example commands, for lines changed and the time.  The file only needs the settings you want to change, so delete anything you'd rather keep at its default.  Anything left out keeps its default, and `labels`, `git`, `git.env`, and `commands` are merged with their defaults one key at a time.  `#` comments and trailing commas are allowed.
+Its layout isn't the default: it adds the untracked-files marker to the git part, two example commands, for lines changed and the time, and colors the context percent like a fire getting hotter: red from 45%, orange from 60%, pink from 75%, and purple from 90%.  The file only needs the settings you want to change, so delete anything you'd rather keep at its default.  Anything left out keeps its default, and `labels`, `git`, `git.env`, `commands`, and `colors` are merged with their defaults one key at a time.  `#` comments and trailing commas are allowed.
 
 If the file has a problem, such as invalid JSON, a misspelled section or setting name, or a value of the wrong type, the statusline shows what's wrong in place of the prompt:
 
@@ -148,6 +148,41 @@ Commands run again on every redraw, one after another, so they add their time to
 
 A command can't use the name of a built-in section, such as `git`.
 
+### colors
+
+Colors for sections, by section name.  Built-in sections and commands can both have one.  Default: no colors.
+
+    {
+        "colors": {
+            "git":     { "color": "#5fafff" },
+            "context": { "color": "#ff8700", "at": 45 }
+        }
+    }
+
+- `color`: the color, as `#rrggbb`, like `#ff69b4` for hot pink or `#ff8700` for orange
+- `at`: only color the section when the number it shows is this or more.  Works for `context` and `cache` (a percent, compared as rounded and shown, so 44.5% shows as 45% and counts as 45) and `cost` (dollars).  Without `at`, the section is always colored.
+
+With the config above, `git` is always blue, and `context` is orange from 45% on and plain below that.
+
+A section can also have a list of colors, to change color more than once as its number goes up:
+
+    {
+        "colors": {
+            "context": [
+                { "color": "#ff3030", "at": 45 },
+                { "color": "#ff8700", "at": 60 },
+                { "color": "#ff69b4", "at": 75 },
+                { "color": "#af5fff", "at": 90 }
+            ]
+        }
+    }
+
+Here `context` is plain below 45%, red from 45%, orange from 60%, pink from 75%, and purple from 90%.  The color with the highest `at` the number has reached is used, so the order of the list doesn't matter.  One color in the list can leave out `at`, and it's used below all the others, in place of no color.  Two colors can't have the same `at`.
+
+The label is colored along with the value, so `context:45%` is all one color.  Separators and the text in a group's `before` and `after` stay uncolored.
+
+Colors are 24-bit, sent as ANSI escape codes.  Most current terminals show them; one that can't may show a nearby color, or none.
+
 ### examples
 
 No blank line under the statusline:
@@ -204,7 +239,7 @@ Claude Code drops statusline lines that are empty or only spaces.  So each paddi
 
     $ prove t/
 
-GitHub Actions runs them on every pull request and every push to `main` (`.github/workflows/test.yml`): on Ubuntu with its own perl and with perl 5.14, and on macOS with its own perl.
+GitHub Actions runs them on every pull request and every push to `main` (`.github/workflows/test.yml`): on Ubuntu with its own perl and with perl 5.14.  A macOS job is in the file but turned off, because GitHub often has no Mac free to run it, and the check fails without running any tests.
 
 The tests run the script with JSON shaped like what Claude Code sends, using temporary home folders and git repos.  Each run is limited to about 1 GB of memory and 10 seconds, so a bug that makes the script run without stopping fails its test instead of slowing down the machine.  They don't read your global git config, your `GIT_PS1_*` settings, or your claude-prompt config.  The tests that check how git's output is shown are skipped if git's prompt helper isn't installed; the rest use a stand-in for it.
 
