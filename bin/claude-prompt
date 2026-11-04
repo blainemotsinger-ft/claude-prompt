@@ -33,14 +33,22 @@ my $COMMAND_TIMEOUT = 1;
 # Bytes of output to keep from git or a command; anything after this is read and thrown away
 my $OUTPUT_LIMIT = 4096;
 
+# The number shown by each section that shows one, for "at" in "colors". Percents are
+# rounded the same way they're shown, so a color starts at the percent you see.
+my %NUMBERS = (
+    context => sub { round_or_undef( number( field( $_[0]{input}, qw(context_window used_percentage) ) ) ) },
+    cache   => sub { round_or_undef( cache_hit_rate( $_[0]{input} ) ) },
+    cost    => sub { number( field( $_[0]{input}, qw(cost total_cost_usd) ) ) },
+);
+
 # Each section returns its text without the label, or nothing to leave it out
 my %SECTIONS = (
     dir     => sub { short_dir( $_[0]{dir} ) },
     git     => sub { git_prompt( $_[0]{dir}, $_[0]{config}{git} ) },
     model   => sub { string( field( $_[0]{input}, qw(model display_name) ) ) },
-    context => sub { percent( number( field( $_[0]{input}, qw(context_window used_percentage) ) ) ) },
-    cache   => sub { percent( cache_hit_rate( $_[0]{input} ) ) },
-    cost    => sub { dollars( number( field( $_[0]{input}, qw(cost total_cost_usd) ) ) ) },
+    context => sub { percent( $NUMBERS{context}->( $_[0] ) ) },
+    cache   => sub { percent( $NUMBERS{cache}->( $_[0] ) ) },
+    cost    => sub { dollars( $NUMBERS{cost}->( $_[0] ) ) },
     time    => sub { duration( number( field( $_[0]{input}, qw(cost total_duration_ms) ) ) ) },
 );
 
@@ -68,6 +76,7 @@ sub default_config {
         },
         padding  => 1,
         commands => {},
+        colors   => {},
     };
 }
 
@@ -161,6 +170,9 @@ sub check_config {
         return "label for \"$name\" should be text"      unless is_text( $config->{labels}{$name} );
     }
 
+    $error = check_colors($config);
+    return $error if $error;
+
     my $git = $config->{git};
     return '"git" should be an object, like {"format": "(%s)"}' unless ref $git eq 'HASH';
     for my $key ( sort keys %$git ) {
@@ -197,6 +209,61 @@ sub check_commands {
         my $timeout = number( $command->{timeout} );
         return "\"timeout\" in command \"$name\" should be a number of seconds above 0, like 1" if exists $command->{timeout} && !( defined $timeout && $timeout > 0 );
     }
+
+    return;
+}
+
+sub check_colors {
+    my ($config) = @_;
+
+    my $colors = $config->{colors};
+    return '"colors" should be an object, like {"context": {"color": "#ff69b4", "at": 45}}' unless ref $colors eq 'HASH';
+
+    for my $name ( sort keys %$colors ) {
+        return "unknown section \"$name\" in \"colors\"" unless is_section( $config, $name );
+
+        my $value = $colors->{$name};
+        if ( ref $value ne 'ARRAY' ) {
+            my $error = check_color( $value, $name, "\"$name\"" );
+            return $error if $error;
+            next;
+        }
+
+        return "the list of colors for \"$name\" is empty" unless @$value;
+
+        my %seen_at;
+        my $without_at = 0;
+        for my $index ( 0 .. $#$value ) {
+            my $color = $value->[$index];
+            my $error = check_color( $color, $name, "\"$name\" (color " . ( $index + 1 ) . ')' );
+            return $error if $error;
+
+            if ( !exists $color->{at} ) {
+                return "only one color for \"$name\" can leave out \"at\"" if $without_at++;
+            }
+            elsif ( $seen_at{ 0 + $color->{at} }++ ) {
+                return "two colors for \"$name\" have the same \"at\", $color->{at}";
+            }
+        }
+    }
+
+    return;
+}
+
+# Checks one color for a section; $where names it in messages
+sub check_color {
+    my ( $color, $name, $where ) = @_;
+
+    return "color for $where should be an object, like {\"color\": \"#ff69b4\"}, or a list of them" unless ref $color eq 'HASH';
+    for my $key ( sort keys %$color ) {
+        return "unknown setting \"$key\" in color for $where" unless $key =~ /^(?:color|at)$/;
+    }
+    return "color for $where needs \"color\", a color like \"#ff69b4\"" unless exists $color->{color};
+    return "\"color\" for $where should be a color like \"#ff69b4\""    unless is_text( $color->{color} ) && $color->{color} =~ /^#[0-9a-fA-F]{6}$/;
+
+    return                                                                                                                                         unless exists $color->{at};
+    return "\"at\" for $where should be a number, like 45"                                                                                         unless defined number( $color->{at} );
+    return "\"at\" for $where can't be used, because \"$name\" doesn't show a number (\"at\" works for: " . join( ', ', sort keys %NUMBERS ) . ')' unless $NUMBERS{$name};
 
     return;
 }
@@ -262,7 +329,29 @@ sub render_item {
     my $value = $SECTIONS{$item} ? $SECTIONS{$item}->($context) : run_command( $context->{config}{commands}{$item}, $context );
     return unless defined $value && length $value;
 
-    return ( $context->{config}{labels}{$item} // '' ) . $value;
+    return colored( $item, ( $context->{config}{labels}{$item} // '' ) . $value, $context );
+}
+
+# Wraps a section's text, label included, in its color from the config. A color with "at" only
+# counts when the number the section shows is at or above it. From a list, the color with the
+# highest "at" that's been reached wins, then the one without "at", if there is one.
+sub colored {
+    my ( $name, $text, $context ) = @_;
+
+    my $colors = $context->{config}{colors}{$name};
+    return $text unless $colors;
+
+    my $shown   = $NUMBERS{$name}                                                                              ? $NUMBERS{$name}->($context) : undef;
+    my @reached = grep { !exists $_->{at} || ( defined $shown && $shown >= $_->{at} ) } ref $colors eq 'ARRAY' ? @$colors                    : ($colors);
+
+    # A color without "at" sorts below every number
+    my $lowest = -9**9**9;
+    my ($color) = sort { ( $b->{at} // $lowest ) <=> ( $a->{at} // $lowest ) } @reached;
+    return $text unless $color;
+
+    # A 24-bit foreground color, then back to the terminal's own foreground color
+    my ( $red, $green, $blue ) = map {hex} $color->{color} =~ /^#(..)(..)(..)$/;
+    return "\e[38;2;$red;$green;${blue}m$text\e[39m";
 }
 
 # Walks nested hashes, returning undef if any step is missing or not a hash
@@ -295,6 +384,12 @@ sub round {
     my ($value) = @_;
 
     return POSIX::floor( $value + 0.5 );
+}
+
+sub round_or_undef {
+    my ($value) = @_;
+
+    return defined $value ? round($value) : undef;
 }
 
 sub percent {

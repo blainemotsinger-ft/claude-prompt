@@ -70,5 +70,18 @@
             "run": "perl -MJSON::PP -0777 -ne '$c = decode_json($_)->{cost}; print \"+$c->{total_lines_added} -$c->{total_lines_removed}\" if $c'",
             "timeout": 2
         }
+    },
+
+    # Colors for sections, as #rrggbb.  With "at", a color is only used when the number the
+    # section shows is that or more; "at" works for context, cache, and cost.  From a list,
+    # the color with the highest "at" reached is used.  Here the context percent gets hotter
+    # like a fire: plain below 45%, then red, orange, pink, and purple from 90%.
+    "colors": {
+        "context": [
+            { "color": "#ff3030", "at": 45 },
+            { "color": "#ff8700", "at": 60 },
+            { "color": "#ff69b4", "at": 75 },
+            { "color": "#af5fff", "at": 90 }
+        ]
     }
 }
