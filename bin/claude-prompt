@@ -6,11 +6,8 @@
 #
 # Claude Code runs this on each redraw and sends the session's details as JSON on STDIN.
 #
-# Settings, from the environment:
-#   CLAUDE_PROMPT_PADDING      blank lines after the statusline (default 1)
-#   CLAUDE_PROMPT_GIT_SCRIPT   git's prompt helper that defines __git_ps1
-#                              (default: the first one found in the usual places)
-#   GIT_PS1_*                  passed to __git_ps1 (GIT_PS1_SHOWDIRTYSTATE defaults to 1)
+# The layout comes from ~/.config/claude-prompt/config.json (or $XDG_CONFIG_HOME, or the
+# file named in CLAUDE_PROMPT_CONFIG). Without one, the default below is used. See README.md.
 
 use strict;
 use warnings;
@@ -29,15 +26,59 @@ my $BLANK = "\x{2800}";
 # Seconds to wait for git before leaving the branch out
 my $GIT_TIMEOUT = 1;
 
+# Each section returns its text without the label, or nothing to leave it out
+my %SECTIONS = (
+    dir     => sub { short_dir( $_[0]{dir} ) },
+    git     => sub { git_prompt( $_[0]{dir}, $_[0]{config}{git} ) },
+    model   => sub { string( field( $_[0]{input}, qw(model display_name) ) ) },
+    context => sub { percent( number( field( $_[0]{input}, qw(context_window used_percentage) ) ) ) },
+    cache   => sub { percent( cache_hit_rate( $_[0]{input} ) ) },
+    cost    => sub { dollars( number( field( $_[0]{input}, qw(cost total_cost_usd) ) ) ) },
+    time    => sub { duration( number( field( $_[0]{input}, qw(cost total_duration_ms) ) ) ) },
+);
+
+sub default_config {
+    return {
+        sections => [
+            'dir', 'git',
+            {   before    => '[',
+                sections  => [qw(model context cache cost time)],
+                separator => ' | ',
+                after     => ']',
+            },
+        ],
+        separator => ' ',
+        labels    => {
+            model   => 'model:',
+            context => 'context:',
+            cache   => 'cache:',
+            cost    => 'cost:',
+            time    => 'time:',
+        },
+        git => {
+            format => '(%s)',
+            env    => {},
+        },
+        padding => 1,
+    };
+}
+
 binmode STDOUT, ':encoding(UTF-8)';
 
 my $input = read_input();
 my $dir   = string( field( $input, qw(workspace current_dir) ) ) // string( field( $input, 'cwd' ) );
 
-my @prompt = grep {defined} ( short_dir($dir), git_prompt($dir), session_info($input), );
+my $config = eval { load_config() };
+if ( !$config ) {
+    print 'claude-prompt: ', $@;
+    print "$BLANK\n";
+    exit;
+}
 
-print join( ' ', @prompt ), "\n";
-print "$BLANK\n" for 1 .. padding();
+my $line = render_items( $config->{sections}, $config->{separator}, { input => $input, config => $config, dir => $dir } );
+
+print $line // '', "\n";
+print "$BLANK\n" for 1 .. $config->{padding};
 
 sub read_input {
     my $json = do { local $/; <STDIN> }
@@ -45,6 +86,141 @@ sub read_input {
     my $data = eval { JSON::PP->new->utf8->decode($json) };
 
     return ref $data eq 'HASH' ? $data : {};
+}
+
+sub config_path {
+    return Encode::decode( 'UTF-8', $ENV{CLAUDE_PROMPT_CONFIG} ) if length( $ENV{CLAUDE_PROMPT_CONFIG} // '' );
+
+    my $base = length( $ENV{XDG_CONFIG_HOME} // '' ) ? $ENV{XDG_CONFIG_HOME} : ( $ENV{HOME} // '' ) . '/.config';
+    return Encode::decode( 'UTF-8', "$base/claude-prompt/config.json" );
+}
+
+# Reads the config file over the defaults, dying with a message for the statusline if it's wrong
+sub load_config {
+    my $config = default_config();
+    my $path   = config_path();
+    my $name   = short_dir($path);
+
+    my $path_bytes = Encode::encode( 'UTF-8', $path );
+    return $config unless -e $path_bytes;
+
+    open my $fh, '<:raw', $path_bytes or die "$name: can't read it: $!\n";
+    my $json = do { local $/; <$fh> }
+        // '';
+    close $fh;
+
+    my $user = eval { JSON::PP->new->utf8->relaxed->decode($json) };
+    if ( !defined $user ) {
+        my $error = $@;
+        $error =~ s/,? at \S+ line \d+\.?\s*$//;
+        die "$name: not valid JSON: $error\n";
+    }
+    die "$name: should hold a JSON object, like {\"padding\": 1}\n" unless ref $user eq 'HASH';
+
+    for my $key ( sort keys %$user ) {
+        die "$name: unknown setting \"$key\"\n" unless exists $config->{$key};
+
+        if ( ref $config->{$key} eq 'HASH' && ref $user->{$key} eq 'HASH' ) {
+            $config->{$key} = { %{ $config->{$key} }, %{ $user->{$key} } };
+        }
+        else {
+            $config->{$key} = $user->{$key};
+        }
+    }
+
+    my $error = check_config($config);
+    die "$name: $error\n" if $error;
+
+    return $config;
+}
+
+# Returns a description of the first problem found, or nothing if the config is usable
+sub check_config {
+    my ($config) = @_;
+
+    my $error = check_sections( $config->{sections}, 'sections' );
+    return $error if $error;
+
+    return '"separator" should be text' unless is_text( $config->{separator} );
+
+    return '"labels" should be an object, like {"model": "model:"}' unless ref $config->{labels} eq 'HASH';
+    for my $name ( sort keys %{ $config->{labels} } ) {
+        return "unknown section \"$name\" in \"labels\"" unless $SECTIONS{$name};
+        return "label for \"$name\" should be text"      unless is_text( $config->{labels}{$name} );
+    }
+
+    my $git = $config->{git};
+    return '"git" should be an object, like {"format": "(%s)"}' unless ref $git eq 'HASH';
+    for my $key ( sort keys %$git ) {
+        return "unknown setting \"$key\" in \"git\"" unless $key =~ /^(?:format|script|env)$/;
+    }
+    return '"git.format" should be text' if !is_text( $git->{format} );
+    return '"git.script" should be text' if exists $git->{script} && !is_text( $git->{script} );
+    return '"git.env" should be an object, like {"GIT_PS1_SHOWDIRTYSTATE": "1"}' unless ref $git->{env} eq 'HASH';
+    for my $name ( sort keys %{ $git->{env} } ) {
+        return "\"git.env\" value for \"$name\" should be text" unless is_text( $git->{env}{$name} );
+    }
+
+    return '"padding" should be a whole number, like 1' unless defined $config->{padding} && !ref $config->{padding} && $config->{padding} =~ /^\d+$/;
+
+    return;
+}
+
+sub check_sections {
+    my ( $sections, $where ) = @_;
+
+    return "\"$where\" should be a list, like [\"dir\", \"git\"]" unless ref $sections eq 'ARRAY';
+
+    for my $item (@$sections) {
+        if ( ref $item eq 'HASH' ) {
+            for my $key ( sort keys %$item ) {
+                return "unknown setting \"$key\" in a group in \"$where\"" unless $key =~ /^(?:sections|separator|before|after)$/;
+            }
+            for my $key (qw(separator before after)) {
+                return "\"$key\" in a group in \"$where\" should be text" if exists $item->{$key} && !is_text( $item->{$key} );
+            }
+            my $error = check_sections( $item->{sections}, "$where.sections" );
+            return $error if $error;
+        }
+        elsif ( is_text($item) ) {
+            return "unknown section \"$item\" in \"$where\" (known: " . join( ', ', sort keys %SECTIONS ) . ')' unless $SECTIONS{$item};
+        }
+        else {
+            return "each item in \"$where\" should be a section name or a group";
+        }
+    }
+
+    return;
+}
+
+sub is_text {
+    my ($value) = @_;
+
+    return defined $value && !ref $value;
+}
+
+# Joins the items that have something to show, or returns nothing if none do
+sub render_items {
+    my ( $items, $separator, $context ) = @_;
+
+    my @parts = grep {defined} map { render_item( $_, $context ) } @$items;
+
+    return @parts ? join( $separator, @parts ) : undef;
+}
+
+sub render_item {
+    my ( $item, $context ) = @_;
+
+    if ( ref $item eq 'HASH' ) {
+        my $inner = render_items( $item->{sections}, $item->{separator} // ' ', $context );
+        return unless defined $inner;
+        return ( $item->{before} // '' ) . $inner . ( $item->{after} // '' );
+    }
+
+    my $value = $SECTIONS{$item}->($context);
+    return unless defined $value && length $value;
+
+    return ( $context->{config}{labels}{$item} // '' ) . $value;
 }
 
 # Walks nested hashes, returning undef if any step is missing or not a hash
@@ -79,6 +255,18 @@ sub round {
     return POSIX::floor( $value + 0.5 );
 }
 
+sub percent {
+    my ($value) = @_;
+
+    return defined $value ? round($value) . '%' : undef;
+}
+
+sub dollars {
+    my ($value) = @_;
+
+    return defined $value ? sprintf( '$%.2f', $value ) : undef;
+}
+
 sub short_dir {
     my ($dir) = @_;
 
@@ -94,17 +282,18 @@ sub short_dir {
 }
 
 sub git_prompt {
-    my ($dir) = @_;
+    my ( $dir, $git ) = @_;
 
     return unless defined $dir;
 
     my $dir_bytes = Encode::encode( 'UTF-8', $dir );
     return unless -d $dir_bytes;
 
-    my $script = $ENV{CLAUDE_PROMPT_GIT_SCRIPT} // List::Util::first { -r $_ } @GIT_PROMPT_SCRIPTS;
+    my $script = $git->{script} // List::Util::first { -r $_ } @GIT_PROMPT_SCRIPTS;
     return unless defined $script && -r $script;
 
     local $ENV{GIT_PS1_SHOWDIRTYSTATE} = $ENV{GIT_PS1_SHOWDIRTYSTATE} // 1;
+    local @ENV{ keys %{ $git->{env} } } = map { Encode::encode( 'UTF-8', $_ ) } values %{ $git->{env} };
 
     # Don't take git's index lock just to draw the prompt
     local $ENV{GIT_OPTIONAL_LOCKS} = $ENV{GIT_OPTIONAL_LOCKS} // 0;
@@ -116,7 +305,7 @@ sub git_prompt {
 
         # The alarm carries over into bash, which it ends if git is slow
         alarm $GIT_TIMEOUT;
-        { exec 'bash', '-c', '. "$1" && __git_ps1 "(%s)"', 'claude-prompt', $script };
+        { exec 'bash', '-c', '. "$1" && __git_ps1 "$2"', 'claude-prompt', $script, Encode::encode( 'UTF-8', $git->{format} ) };
         POSIX::_exit(1);
     }
 
@@ -130,36 +319,13 @@ sub git_prompt {
     return length $out ? $out : undef;
 }
 
-sub session_info {
-    my ($input) = @_;
-
-    my @parts;
-
-    my $model = string( field( $input, qw(model display_name) ) );
-    push @parts, "model:$model" if defined $model;
-
-    my $context = number( field( $input, qw(context_window used_percentage) ) );
-    push @parts, 'context:' . round($context) . '%' if defined $context;
-
-    my $cache = cache_hit_rate($input);
-    push @parts, "cache:$cache%" if defined $cache;
-
-    my $cost = number( field( $input, qw(cost total_cost_usd) ) );
-    push @parts, sprintf( 'cost:$%.2f', $cost ) if defined $cost;
-
-    my $ms = number( field( $input, qw(cost total_duration_ms) ) );
-    push @parts, 'time:' . duration($ms) if defined $ms;
-
-    return @parts ? '[' . join( ' | ', @parts ) . ']' : undef;
-}
-
 # Uses Claude Code's hit ratio for the whole session when it sends one,
 # otherwise works it out from the last request's token counts
 sub cache_hit_rate {
     my ($input) = @_;
 
     my $ratio = number( field( $input, qw(prompt_cache hit_ratio) ) );
-    return round( $ratio * 100 ) if defined $ratio;
+    return $ratio * 100 if defined $ratio;
 
     my $usage = field( $input, qw(context_window current_usage) );
     my ( $read, $created, $uncached ) = map { number( field( $usage, $_ ) ) // 0 } qw(cache_read_input_tokens cache_creation_input_tokens input_tokens);
@@ -167,11 +333,13 @@ sub cache_hit_rate {
     my $total = $read + $created + $uncached;
     return unless $total > 0;
 
-    return round( $read / $total * 100 );
+    return $read / $total * 100;
 }
 
 sub duration {
     my ($ms) = @_;
+
+    return unless defined $ms;
 
     my $seconds = int( $ms / 1000 );
     my $minutes = int( $seconds / 60 );
@@ -180,10 +348,4 @@ sub duration {
     return $hours . 'h' .   ( $minutes % 60 ? ' ' . ( $minutes % 60 ) . 'm' : '' ) if $hours;
     return $minutes . 'm' . ( $seconds % 60 ? ' ' . ( $seconds % 60 ) . 's' : '' ) if $minutes;
     return $seconds . 's';
-}
-
-sub padding {
-    my $lines = $ENV{CLAUDE_PROMPT_PADDING} // 1;
-
-    return $lines =~ /^\d+$/ ? $lines : 1;
 }
