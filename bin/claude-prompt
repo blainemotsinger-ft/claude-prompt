@@ -1,0 +1,189 @@
+#!/usr/bin/perl
+
+# Claude Code statusline in the style of a shell prompt:
+#
+#   ~/git/repo (branch *) [model:Opus 5.5 | context:10% | cache:98% | cost:$1.97 | time:1h 2m]
+#
+# Claude Code runs this on each redraw and sends the session's details as JSON on STDIN.
+#
+# Settings, from the environment:
+#   CLAUDE_PROMPT_PADDING      blank lines after the statusline (default 1)
+#   CLAUDE_PROMPT_GIT_SCRIPT   git's prompt helper that defines __git_ps1
+#                              (default: the first one found in the usual places)
+#   GIT_PS1_*                  passed to __git_ps1 (GIT_PS1_SHOWDIRTYSTATE defaults to 1)
+
+use strict;
+use warnings;
+
+use Encode     ();
+use JSON::PP   ();
+use List::Util ();
+use POSIX      ();
+
+my @GIT_PROMPT_SCRIPTS = ( '/usr/lib/git-core/git-sh-prompt', '/usr/share/git-core/contrib/completion/git-prompt.sh', '/etc/bash_completion.d/git-prompt', '/opt/homebrew/etc/bash_completion.d/git-prompt.sh', '/usr/local/etc/bash_completion.d/git-prompt.sh', );
+
+# Claude Code drops lines that are empty or only whitespace, so padding lines
+# hold a Braille blank (U+2800): it draws nothing but is not whitespace
+my $BLANK = "\x{2800}";
+
+# Seconds to wait for git before leaving the branch out
+my $GIT_TIMEOUT = 1;
+
+binmode STDOUT, ':encoding(UTF-8)';
+
+my $input = read_input();
+my $dir   = string( field( $input, qw(workspace current_dir) ) ) // string( field( $input, 'cwd' ) );
+
+my @prompt = grep {defined} ( short_dir($dir), git_prompt($dir), session_info($input), );
+
+print join( ' ', @prompt ), "\n";
+print "$BLANK\n" for 1 .. padding();
+
+sub read_input {
+    my $json = do { local $/; <STDIN> }
+        // '';
+    my $data = eval { JSON::PP->new->utf8->decode($json) };
+
+    return ref $data eq 'HASH' ? $data : {};
+}
+
+# Walks nested hashes, returning undef if any step is missing or not a hash
+sub field {
+    my ( $data, @path ) = @_;
+
+    for my $key (@path) {
+        return unless ref $data eq 'HASH';
+        $data = $data->{$key};
+    }
+
+    return $data;
+}
+
+sub string {
+    my ($value) = @_;
+
+    return defined $value && !ref $value && length $value ? $value : undef;
+}
+
+sub number {
+    my ($value) = @_;
+
+    return unless defined $value && !ref $value;
+    return $value =~ /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/ ? $value : undef;
+}
+
+# Rounds half up, so 12.5 becomes 13
+sub round {
+    my ($value) = @_;
+
+    return POSIX::floor( $value + 0.5 );
+}
+
+sub short_dir {
+    my ($dir) = @_;
+
+    return unless defined $dir;
+
+    my $home = Encode::decode( 'UTF-8', $ENV{HOME} // '' );
+    $home =~ s{/+$}{};
+
+    return $dir                               if $home eq '';
+    return '~'                                if $dir eq $home;
+    return '~' . substr( $dir, length $home ) if index( $dir, "$home/" ) == 0;
+    return $dir;
+}
+
+sub git_prompt {
+    my ($dir) = @_;
+
+    return unless defined $dir;
+
+    my $dir_bytes = Encode::encode( 'UTF-8', $dir );
+    return unless -d $dir_bytes;
+
+    my $script = $ENV{CLAUDE_PROMPT_GIT_SCRIPT} // List::Util::first { -r $_ } @GIT_PROMPT_SCRIPTS;
+    return unless defined $script && -r $script;
+
+    local $ENV{GIT_PS1_SHOWDIRTYSTATE} = $ENV{GIT_PS1_SHOWDIRTYSTATE} // 1;
+
+    # Don't take git's index lock just to draw the prompt
+    local $ENV{GIT_OPTIONAL_LOCKS} = $ENV{GIT_OPTIONAL_LOCKS} // 0;
+
+    my $pid = open( my $fh, '-|' ) // return;
+    if ( $pid == 0 ) {
+        chdir $dir_bytes or POSIX::_exit(1);
+        open STDERR, '>', '/dev/null';
+
+        # The alarm carries over into bash, which it ends if git is slow
+        alarm $GIT_TIMEOUT;
+        { exec 'bash', '-c', '. "$1" && __git_ps1 "(%s)"', 'claude-prompt', $script };
+        POSIX::_exit(1);
+    }
+
+    my $out = do { local $/; <$fh> }
+        // '';
+    close $fh;
+
+    $out = Encode::decode( 'UTF-8', $out );
+    $out =~ s/^\s+|\s+$//g;
+
+    return length $out ? $out : undef;
+}
+
+sub session_info {
+    my ($input) = @_;
+
+    my @parts;
+
+    my $model = string( field( $input, qw(model display_name) ) );
+    push @parts, "model:$model" if defined $model;
+
+    my $context = number( field( $input, qw(context_window used_percentage) ) );
+    push @parts, 'context:' . round($context) . '%' if defined $context;
+
+    my $cache = cache_hit_rate($input);
+    push @parts, "cache:$cache%" if defined $cache;
+
+    my $cost = number( field( $input, qw(cost total_cost_usd) ) );
+    push @parts, sprintf( 'cost:$%.2f', $cost ) if defined $cost;
+
+    my $ms = number( field( $input, qw(cost total_duration_ms) ) );
+    push @parts, 'time:' . duration($ms) if defined $ms;
+
+    return @parts ? '[' . join( ' | ', @parts ) . ']' : undef;
+}
+
+# Uses Claude Code's hit ratio for the whole session when it sends one,
+# otherwise works it out from the last request's token counts
+sub cache_hit_rate {
+    my ($input) = @_;
+
+    my $ratio = number( field( $input, qw(prompt_cache hit_ratio) ) );
+    return round( $ratio * 100 ) if defined $ratio;
+
+    my $usage = field( $input, qw(context_window current_usage) );
+    my ( $read, $created, $uncached ) = map { number( field( $usage, $_ ) ) // 0 } qw(cache_read_input_tokens cache_creation_input_tokens input_tokens);
+
+    my $total = $read + $created + $uncached;
+    return unless $total > 0;
+
+    return round( $read / $total * 100 );
+}
+
+sub duration {
+    my ($ms) = @_;
+
+    my $seconds = int( $ms / 1000 );
+    my $minutes = int( $seconds / 60 );
+    my $hours   = int( $minutes / 60 );
+
+    return $hours . 'h' .   ( $minutes % 60 ? ' ' . ( $minutes % 60 ) . 'm' : '' ) if $hours;
+    return $minutes . 'm' . ( $seconds % 60 ? ' ' . ( $seconds % 60 ) . 's' : '' ) if $minutes;
+    return $seconds . 's';
+}
+
+sub padding {
+    my $lines = $ENV{CLAUDE_PROMPT_PADDING} // 1;
+
+    return $lines =~ /^\d+$/ ? $lines : 1;
+}
