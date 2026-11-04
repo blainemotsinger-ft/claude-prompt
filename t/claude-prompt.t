@@ -15,7 +15,7 @@ my $BLANK  = "\x{2800}";
 # Keep the person's own git and prompt settings out of the tests
 $ENV{GIT_CONFIG_GLOBAL}   = '/dev/null';
 $ENV{GIT_CONFIG_NOSYSTEM} = 1;
-delete $ENV{$_} for grep {/^(?:GIT_PS1_|CLAUDE_PROMPT_)/} keys %ENV;
+delete $ENV{$_} for grep {/^(?:GIT_PS1_|CLAUDE_PROMPT_|XDG_CONFIG_HOME$)/} keys %ENV;
 
 binmode Test::More->builder->$_, ':encoding(UTF-8)' for qw(output failure_output todo_output);
 
@@ -98,10 +98,30 @@ sub home_with_repo {
     return ( $home, $repo );
 }
 
+sub add_uncommitted_change {
+    my ($repo) = @_;
+
+    open my $fh, '>>', "$repo/README.md" or die $!;
+    print {$fh} "more\n";
+    close $fh;
+}
+
+# Writes a config file into the home folder's default location, from a hash or raw text
+sub write_config {
+    my ( $home, $config ) = @_;
+
+    mkdir "$home/.config";
+    mkdir "$home/.config/claude-prompt";
+
+    open my $fh, '>:raw', "$home/.config/claude-prompt/config.json" or die $!;
+    print {$fh} ref $config ? JSON::PP->new->utf8->encode($config) : Encode::encode( 'UTF-8', $config );
+    close $fh;
+}
+
 my $have_git_prompt = grep { -r $_ } ( '/usr/lib/git-core/git-sh-prompt', '/usr/share/git-core/contrib/completion/git-prompt.sh', '/etc/bash_completion.d/git-prompt', '/opt/homebrew/etc/bash_completion.d/git-prompt.sh', '/usr/local/etc/bash_completion.d/git-prompt.sh', );
 
 SKIP: {
-    skip "git's prompt helper is not installed", 3 unless $have_git_prompt;
+    skip "git's prompt helper is not installed", 5 unless $have_git_prompt;
 
     subtest 'should print the folder, branch, and session details when in a git repo' => sub {
 
@@ -143,6 +163,33 @@ SKIP: {
 
         # Assert
         like( $line, qr/^~\/git\/claude-pulse \(main\) \[/ );
+    };
+
+    subtest 'should wrap the branch in the git format from the config' => sub {
+
+        # Arrange
+        my ( $home, $repo ) = home_with_repo();
+        write_config( $home, { git => { format => '‹%s›' } } );
+
+        # Act
+        my ($line) = run_prompt( session_input($repo), HOME => "$home" );
+
+        # Assert
+        like( $line, qr/^~\/git\/claude-pulse ‹main› \[/ );
+    };
+
+    subtest 'should pass git.env settings from the config to __git_ps1' => sub {
+
+        # Arrange
+        my ( $home, $repo ) = home_with_repo();
+        add_uncommitted_change($repo);
+        write_config( $home, { git => { env => { GIT_PS1_STATESEPARATOR => '' } } } );
+
+        # Act
+        my ($line) = run_prompt( session_input($repo), HOME => "$home" );
+
+        # Assert
+        like( $line, qr/^~\/git\/claude-pulse \(main\*\) \[/ );
     };
 }
 
@@ -350,25 +397,27 @@ subtest 'should add one padding line by default' => sub {
     is_deeply( [ @lines[ 1 .. $#lines ] ], [$BLANK] );
 };
 
-subtest 'should add the number of padding lines set in CLAUDE_PROMPT_PADDING' => sub {
+subtest 'should add the number of padding lines set in the config' => sub {
 
     # Arrange
     my $home = File::Temp->newdir;
+    write_config( $home, { padding => 3 } );
 
     # Act
-    my @lines = run_prompt( session_input("$home"), HOME => "$home", CLAUDE_PROMPT_PADDING => 3 );
+    my @lines = run_prompt( session_input("$home"), HOME => "$home" );
 
     # Assert
     is_deeply( [ @lines[ 1 .. $#lines ] ], [ $BLANK, $BLANK, $BLANK ] );
 };
 
-subtest 'should add no padding lines when CLAUDE_PROMPT_PADDING is 0' => sub {
+subtest 'should add no padding lines when the config sets padding to 0' => sub {
 
     # Arrange
     my $home = File::Temp->newdir;
+    write_config( $home, { padding => 0 } );
 
     # Act
-    my @lines = run_prompt( session_input("$home"), HOME => "$home", CLAUDE_PROMPT_PADDING => 0 );
+    my @lines = run_prompt( session_input("$home"), HOME => "$home" );
 
     # Assert
     is( scalar @lines, 1 );
@@ -384,6 +433,235 @@ subtest 'should print an empty line and padding when the input is not JSON' => s
 
     # Assert
     is_deeply( \@lines, [ '', $BLANK ] );
+};
+
+subtest 'should match the default layout when using config.example.json' => sub {
+
+    # Arrange
+    my $home    = File::Temp->newdir;
+    my @default = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Act
+    my @lines = run_prompt( session_input("$home"), HOME => "$home", CLAUDE_PROMPT_CONFIG => "$FindBin::Bin/../config.example.json" );
+
+    # Assert
+    is_deeply( \@lines, \@default );
+};
+
+subtest 'should show sections in the order the config lists them' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [qw(cost model dir)] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'cost:$1.97 model:Opus 5.5 ~' );
+};
+
+subtest 'should join sections with the separator from the config' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [qw(dir model)], separator => ' :: ' } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, '~ :: model:Opus 5.5' );
+};
+
+subtest 'should keep the default labels for sections the config does not relabel' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [qw(model context)], labels => { context => 'ctx ' } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'model:Opus 5.5 ctx 10%' );
+};
+
+subtest 'should show no label when the config sets it to an empty string' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => ['model'], labels => { model => '' } } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'Opus 5.5' );
+};
+
+subtest 'should leave out a group and its brackets when none of its sections have a value' => sub {
+
+    # Arrange
+    my $home  = File::Temp->newdir;
+    my $input = session_input("$home");
+    delete $input->{cost};
+    write_config( $home, { sections => [ 'dir', { before => '{', sections => [qw(cost time)], after => '}' } ] } );
+
+    # Act
+    my ($line) = run_prompt( $input, HOME => "$home" );
+
+    # Assert
+    is( $line, '~' );
+};
+
+subtest 'should join a group with a space when the group has no separator' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [ { sections => [qw(cost time)] } ] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'cost:$1.97 time:1h 2m' );
+};
+
+subtest 'should render a group inside a group' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [ { before => '<', sections => [ 'model', { before => '(', sections => ['cost'], after => ')' } ], after => '>' } ] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, '<model:Opus 5.5 (cost:$1.97)>' );
+};
+
+subtest 'should allow comments and trailing commas in the config' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, qq({\n    # just the model\n    "sections": ["model",],\n}\n) );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is( $line, 'model:Opus 5.5' );
+};
+
+subtest 'should read the config from XDG_CONFIG_HOME when it is set' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    my $xdg  = File::Temp->newdir;
+    mkdir "$xdg/claude-prompt";
+    open my $fh, '>', "$xdg/claude-prompt/config.json" or die $!;
+    print {$fh} '{"sections": ["cost"]}';
+    close $fh;
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home", XDG_CONFIG_HOME => "$xdg" );
+
+    # Assert
+    is( $line, 'cost:$1.97' );
+};
+
+subtest 'should read the config from CLAUDE_PROMPT_CONFIG when it is set' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    my $file = File::Temp->new( SUFFIX => '.json' );
+    print {$file} '{"sections": ["time"]}';
+    close $file;
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home", CLAUDE_PROMPT_CONFIG => $file->filename );
+
+    # Assert
+    is( $line, 'time:1h 2m' );
+};
+
+subtest 'should show an error in the statusline when the config is not valid JSON' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, '{"sections": [' );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/^claude-prompt: ~\/\.config\/claude-prompt\/config\.json: not valid JSON: / );
+};
+
+subtest 'should show an error naming an unknown section' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [qw(dir modle)] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/^claude-prompt: .*: unknown section "modle" in "sections" \(known: / );
+};
+
+subtest 'should show an error naming an unknown section inside a group' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { sections => [ { sections => ['coast'] } ] } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: unknown section "coast" in "sections\.sections"/ );
+};
+
+subtest 'should show an error naming an unknown setting' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { seperator => ' ' } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: unknown setting "seperator"$/ );
+};
+
+subtest 'should show an error when padding is not a whole number' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { padding => 'two' } );
+
+    # Act
+    my ($line) = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    like( $line, qr/: "padding" should be a whole number/ );
+};
+
+subtest 'should still add one padding line when showing a config error' => sub {
+
+    # Arrange
+    my $home = File::Temp->newdir;
+    write_config( $home, { padding => 'two' } );
+
+    # Act
+    my @lines = run_prompt( session_input("$home"), HOME => "$home" );
+
+    # Assert
+    is_deeply( [ @lines[ 1 .. $#lines ] ], [$BLANK] );
 };
 
 done_testing;

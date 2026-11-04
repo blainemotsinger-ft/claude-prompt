@@ -1,0 +1,25 @@
+{
+    "sections": [
+        "dir",
+        "git",
+        {
+            "before": "[",
+            "sections": ["model", "context", "cache", "cost", "time"],
+            "separator": " | ",
+            "after": "]"
+        }
+    ],
+    "separator": " ",
+    "labels": {
+        "model": "model:",
+        "context": "context:",
+        "cache": "cache:",
+        "cost": "cost:",
+        "time": "time:"
+    },
+    "git": {
+        "format": "(%s)",
+        "env": {}
+    },
+    "padding": 1
+}
