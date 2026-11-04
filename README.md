@@ -239,7 +239,7 @@ Claude Code drops statusline lines that are empty or only spaces.  So each paddi
 
     $ prove t/
 
-GitHub Actions runs them on every pull request and every push to `main` (`.github/workflows/test.yml`): on Ubuntu with its own perl and with perl 5.14, and on macOS with its own perl.
+GitHub Actions runs them on every pull request and every push to `main` (`.github/workflows/test.yml`): on Ubuntu with its own perl and with perl 5.14.  A macOS job is in the file but turned off, because GitHub often has no Mac free to run it, and the check fails without running any tests.
 
 The tests run the script with JSON shaped like what Claude Code sends, using temporary home folders and git repos.  Each run is limited to about 1 GB of memory and 10 seconds, so a bug that makes the script run without stopping fails its test instead of slowing down the machine.  They don't read your global git config, your `GIT_PS1_*` settings, or your claude-prompt config.  The tests that check how git's output is shown are skipped if git's prompt helper isn't installed; the rest use a stand-in for it.
 
